@@ -28,6 +28,7 @@ void* DoPhilosopherThings(void* arg) {
 
     Log("Philosopher #%d is hungry now\n", n);
     pthread_mutex_lock(&fork_mut[n]);
+    // TODO: try lock
     pthread_mutex_lock(&fork_mut[(n + 1) % PHILOSOPHERS_N]);
 
     Log("Philosopher #%d is eating\n", n);
