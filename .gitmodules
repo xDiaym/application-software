@@ -1,3 +1,3 @@
 [submodule "s1e5"]
-	path = memfs
+	path = s1e5
 	url = git@github.com:xDiaym/memfs.git
