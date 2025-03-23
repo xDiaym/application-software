@@ -23,13 +23,17 @@ void* DoPhilosopherThings(void* arg) {
   intptr_t n = (intptr_t)arg;
 
   while (1) {
+  think:
     Log("Philosopher #%d is thinking\n", n);
     sleep(rand() % 3);
 
     Log("Philosopher #%d is hungry now\n", n);
     pthread_mutex_lock(&fork_mut[n]);
-    // TODO: try lock
-    pthread_mutex_lock(&fork_mut[(n + 1) % PHILOSOPHERS_N]);
+    if (pthread_mutex_trylock(&fork_mut[(n + 1) % PHILOSOPHERS_N])) {
+      pthread_mutex_unlock(&fork_mut[n]);
+      Log("Philosopher #%d failed to capture fork #%d\n", n, (n + 1) % PHILOSOPHERS_N);
+      goto think;
+    }
 
     Log("Philosopher #%d is eating\n", n);
     sleep(rand() % 3);
