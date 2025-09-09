@@ -7,8 +7,7 @@ CRLF = "\r\n"
 
 class Client:
     def __init__(self) -> None:
-        # self._nick: str = None
-        pass
+        self._last_channel: str | None = None
 
     async def _handle_server(self) -> None:
         while True:  #not self._reader.at_eof():
@@ -18,6 +17,7 @@ class Client:
                 break
             if not binary:
                 break
+            line = binary.decode().rstrip()
             print(f"> {binary.decode('utf-8')}")
 
     async def _handle_stdin(self) -> None:
@@ -28,12 +28,22 @@ class Client:
 
         while True:
             try:
-                line = (await reader.readline()).rstrip()
+                line = (await reader.readline()).decode().rstrip()
             except asyncio.CancelledError:
                 break
             if not line:
                 break  # TODO quit
-            await self._send(line.decode())
+            
+            command, *args = line.split(' ')
+            if command == "/msg":
+                self._last_channel = args[0]
+                text = " ".join(args[1:])
+                await self._send(f"PRIVMSG {self._last_channel} :{text}")
+            else:
+                if self._last_channel is not None:
+                    await self._send(f"PRIVMSG {self._last_channel} :{line}")
+                else:
+                    print("connect to channel first")
 
     async def _send(self, line: str) -> None:
         self._writer.write(f"{line}{CRLF}".encode())
