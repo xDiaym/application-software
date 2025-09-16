@@ -4,15 +4,17 @@ CREATE TABLE IF NOT EXISTS users(
     password_hash VARCHAR(256) NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS channels(
+CREATE TABLE IF NOT EXISTS chats(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(16) UNIQUE NOT NULL
 );
 
+INSERT INTO chats(name) VALUES ("#global");
+
 CREATE TABLE IF NOT EXISTS messages(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     author_id TEXT NOT NULL REFERENCES users(id),
-    channel_id TEXT NOT NULL REFERENCES channels(id),
+    chat_id TEXT NOT NULL REFERENCES chats(id),
     created_at TIMESTAMP DEFAULT NOW NOT NULL,
     text_ TEXT NOT NULL
 );

@@ -10,7 +10,7 @@ class Client:
         self._last_channel: str | None = None
 
     async def _handle_server(self) -> None:
-        while True:  #not self._reader.at_eof():
+        while True:  # not self._reader.at_eof():
             try:
                 binary = await self._reader.readline()
             except asyncio.CancelledError:
@@ -18,7 +18,7 @@ class Client:
             if not binary:
                 break
             line = binary.decode().rstrip()
-            print(f"> {binary.decode('utf-8')}")
+            print(f"> {line}")
 
     async def _handle_stdin(self) -> None:
         loop = asyncio.get_running_loop()
@@ -33,8 +33,8 @@ class Client:
                 break
             if not line:
                 break  # TODO quit
-            
-            command, *args = line.split(' ')
+
+            command, *args = line.split(" ")
             if command == "/msg":
                 self._last_channel = args[0]
                 text = " ".join(args[1:])
@@ -55,7 +55,9 @@ class Client:
         server_task = asyncio.create_task(self._handle_server())
         stdin_task = asyncio.create_task(self._handle_stdin())
 
-        _done, pending = await asyncio.wait({server_task, stdin_task}, return_when=asyncio.FIRST_COMPLETED)
+        _done, pending = await asyncio.wait(
+            {server_task, stdin_task}, return_when=asyncio.FIRST_COMPLETED
+        )
         for task in pending:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
