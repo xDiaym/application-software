@@ -135,6 +135,17 @@ class Client:
     async def send(self, line: str) -> None:
         self._writer.write(line.encode("utf-8"))
         await self._writer.drain()
+    
+    def close(self) -> None:
+        self._writer.close()
+        self._reader.feed_eof()
+
+
+# TODO
+class Command:
+    @classmethod
+    def from_line(cls, _line: str) -> "Command":
+        ...
 
 
 def parse_command(line: str) -> tuple[str, list[str], str]:
@@ -176,7 +187,7 @@ class IRCServer:
         COMMANDS: dict[str, t.Callable[[Client, list[str], str], t.Awaitable[None]]] = {
             "JOIN": self._join,
             "QUIT": self._quit,
-            # "REGISTER": self._register,
+            "REG": self._reg,
             "PRIVMSG": self._privmsg,
         }
 
@@ -193,10 +204,25 @@ class IRCServer:
         await self.broadcast(channel, f"{client.prefix} JOIN {channel}")
 
     async def _quit(self, client: Client, args: list[str], text: str) -> None:
-        pass
+        for channel, clients in self._channels.items():
+            if client not in clients:
+                continue
 
-    async def _register(self, client: Client, args: list[str], text: str) -> None:
-        pass
+            clients.remove(client)
+            await self.broadcast(
+                channel,
+                f"{client.prefix} QUIT :{text or 'Client quit'}",
+                exclude=client,
+            )
+        client.close()
+        logger.info("%s:%d quit", client.ip, client.port)
+
+    @args_required(2)
+    async def _reg(self, client: Client, args: list[str], _text: str) -> None:
+        nick, password = args
+        await self._storage.register(nick, password)
+        logger.info("new user registered. nick=%s", nick)
+        await client.send(f"REGD {nick}")
 
     @args_required(1)
     async def _privmsg(self, client: Client, args: list[str], text: str) -> None:

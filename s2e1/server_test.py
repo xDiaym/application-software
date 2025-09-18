@@ -40,12 +40,12 @@ async def test_args_required(n_args, args, called):
 
 async def test_storage_register(storage, connection):
     assert await storage.register("nick", "password")
-    async with connection.execute("SELECT * FROM users") as cursor:
+    async with connection.execute("SELECT * FROM users WHERE nick = 'nick'") as cursor:
         assert await cursor.fetchall() == [(1, "nick", SQLiteStorage.hash("password"))]
 
     assert not await storage.register("nick", "pa55word")
     async with connection.execute("SELECT COUNT(*) FROM users") as cursor:
-        assert await cursor.fetchall() == [(1,)]
+        assert await cursor.fetchall() == [(2,)]
 
 
 @pytest.mark.parametrize(

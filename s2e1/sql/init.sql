@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users(
     nick VARCHAR(16) UNIQUE NOT NULL,
     password_hash VARCHAR(256) NOT NULL
 );
+INSERT INTO users(id, nick, password_hash) VALUES (0, 'deleted user', '');
 
 CREATE TABLE IF NOT EXISTS chats(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
