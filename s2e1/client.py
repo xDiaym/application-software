@@ -120,14 +120,6 @@ class Client:
                     else:
                         print("Usage: /login <nick> <password>")
 
-                elif command == "/msg":
-                    if len(args) >= 2:
-                        self._last_channel = args[0]
-                        text = " ".join(args[1:])
-                        await self._send(f"PRIVMSG {self._last_channel} :{text}")
-                    else:
-                        print("Usage: /msg <channel> <text>")
-
                 elif command == "/join":
                     if len(args) >= 1:
                         channel = args[0]
@@ -136,16 +128,26 @@ class Client:
                     else:
                         print("Usage: /join <channel>")
 
+                elif command == "/msg":
+                    if len(args) >= 2:
+                        channel = args[0]
+                        text = " ".join(args[1:])
+                        self._last_channel = channel
+                        await self._send(f"PRIVMSG {channel} :{text}")
+                    else:
+                        print("Usage: /msg <channel> <text>")
+
                 elif command == "/quit":
                     quit_message = " ".join(args) if args else "Client quit"
                     await self._send(f"QUIT :{quit_message}")
                     break
 
                 else:
+                    # Если нет явного канала, используем последний
                     if self._last_channel is not None:
                         await self._send(f"PRIVMSG {self._last_channel} :{line}")
                     else:
-                        print("connect to channel first")
+                        print("*** You must join a channel first or use /msg <channel> <text>")
 
             except asyncio.CancelledError:
                 break

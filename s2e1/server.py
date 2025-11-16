@@ -155,7 +155,8 @@ class Client:
         self._reader = reader
         self._writer = writer
         self._nick: str | None = None
-        self._authenticated = False  # Пользователь зарегистрирован/залогинен
+        self._authenticated = False
+        self._channels: set[str] = set()  # Каналы, к которым присоединен клиент
 
     @property
     def nick(self) -> str | None:
@@ -206,6 +207,7 @@ class IRCServer:
     async def broadcast(
             self, channel: str, line: str, exclude: Client | None = None
     ) -> None:
+        """Отправить сообщение всем клиентам в канале"""
         tasks = [
             client.send(line)
             for client in self._channels[channel]
@@ -254,20 +256,42 @@ class IRCServer:
 
     @args_required(1)
     async def _join(self, client: Client, args: list[str], text: str) -> None:
+        """Присоединение к каналу"""
         channel = args[0]
+
+        # Если уже в этом канале, ничего не делаем
+        if channel in client._channels:
+            logger.warning("%s:%d already in channel %s", client.ip, client.port, channel)
+            return
+
+        # Добавляем клиента в канал
         self._channels[channel].add(client)
+        client._channels.add(channel)
+
         logger.info("%s:%d joined channel %s", client.ip, client.port, channel)
-        await self.broadcast(channel, f"{client.prefix} JOIN {channel}")
+
+        # Отправляем сообщение о присоединении ТОЛЬКО другим клиентам (exclude=client)
+        await self.broadcast(
+            channel,
+            f"{client.prefix} JOIN {channel}",
+            exclude=client
+        )
 
     async def _quit(self, client: Client, args: list[str], text: str) -> None:
-        channels_to_quit = [ch for ch, clients in self._channels.items() if client in clients]
+        """Отключение от всех каналов и выход"""
+        # Создаем копию списка каналов, так как будем его изменять
+        channels_to_quit = list(client._channels)
+
         for channel in channels_to_quit:
             self._channels[channel].discard(client)
+            # Отправляем сообщение о выходе другим клиентам (exclude=client)
             await self.broadcast(
                 channel,
                 f"{client.prefix} QUIT :{text or 'Client quit'}",
                 exclude=client,
             )
+
+        client._channels.clear()
         client.close()
         logger.info("%s:%d quit", client.ip, client.port)
 
@@ -317,15 +341,31 @@ class IRCServer:
 
     @args_required(1)
     async def _privmsg(self, client: Client, args: list[str], text: str) -> None:
+        """Отправка сообщения в канал"""
         channel_name = args[0]
-        if channel_name.startswith("#") and channel_name in self._channels:
-            await self._storage.store_message(client.nick, text)
-            logger.info("%s:%d sent message to %s", client.ip, client.port, channel_name)
-            await self.broadcast(
-                channel_name,
-                f"{client.prefix} PRIVMSG {channel_name} :{text}",
-                exclude=client,
-            )
+
+        # Проверяем, присоединен ли клиент к этому каналу
+        if channel_name not in client._channels:
+            await client.send(f"ERR not in channel {channel_name}")
+            logger.warning("%s:%d tried to send message to channel %s without being in it",
+                           client.ip, client.port, channel_name)
+            return
+
+        # Проверяем, существует ли канал
+        if channel_name not in self._channels:
+            await client.send(f"ERR channel {channel_name} does not exist")
+            return
+
+        # Сохраняем сообщение в БД
+        await self._storage.store_message(client.nick, text)
+        logger.info("%s:%d sent message to %s", client.ip, client.port, channel_name)
+
+        # Отправляем сообщение ТОЛЬКО другим клиентам в канале (exclude=client)
+        await self.broadcast(
+            channel_name,
+            f"{client.prefix} PRIVMSG {channel_name} :{text}",
+            exclude=client,
+        )
 
     async def run(self, host: str = "0.0.0.0", port: int = 6667) -> None:
         server = await asyncio.start_server(self._handle_connection, host, port)
