@@ -94,6 +94,7 @@ class SQLiteStorage:
             return list(x[1] for x in await cursor.fetchall())
 
     async def register(self, nick: str, password: str) -> bool:
+        """Register a new user. Returns True on success, False if nick already exists."""
         async with self._connection.execute(
                 "SELECT COUNT(*) FROM users WHERE nick = ?", (nick,)
         ) as cursor:
@@ -109,6 +110,7 @@ class SQLiteStorage:
         return True
 
     async def verify(self, nick: str, password: str) -> bool:
+        """Verify user credentials. Returns True if valid, False otherwise."""
         async with self._connection.execute(
                 "SELECT COUNT(*) FROM users WHERE nick = ? AND password_hash = ?",
                 (nick, self.hash(password)),
@@ -116,6 +118,16 @@ class SQLiteStorage:
             result = await cursor.fetchone()
             if result:
                 return result[0] == 1
+        return False
+
+    async def user_exists(self, nick: str) -> bool:
+        """Check if user exists."""
+        async with self._connection.execute(
+                "SELECT COUNT(*) FROM users WHERE nick = ?", (nick,)
+        ) as cursor:
+            result = await cursor.fetchone()
+            if result:
+                return result[0] > 0
         return False
 
     @classmethod
@@ -143,7 +155,7 @@ class Client:
         self._reader = reader
         self._writer = writer
         self._nick: str | None = None
-        self._registered = False
+        self._authenticated = False  # Пользователь зарегистрирован/залогинен
 
     @property
     def nick(self) -> str | None:
@@ -221,10 +233,20 @@ class IRCServer:
             "JOIN": self._join,
             "QUIT": self._quit,
             "REG": self._reg,
+            "LOGIN": self._login,
             "PRIVMSG": self._privmsg,
         }
 
         command, args, text = parse_command(line)
+
+        # Проверка: может ли пользователь выполнить эту команду?
+        # Если не аутентифицирован, разрешены только REG, LOGIN и QUIT
+        if not client._authenticated:
+            if command not in ("REG", "LOGIN", "QUIT"):
+                await client.send("ERR not authenticated")
+                logger.warning("%s:%d tried to use %s without authentication", client.ip, client.port, command)
+                return
+
         if fn := COMMANDS.get(command):
             await fn(client, args, text)
         else:
@@ -235,7 +257,6 @@ class IRCServer:
         channel = args[0]
         self._channels[channel].add(client)
         logger.info("%s:%d joined channel %s", client.ip, client.port, channel)
-        # Broadcast JOIN to all clients in the channel (including the one that just joined)
         await self.broadcast(channel, f"{client.prefix} JOIN {channel}")
 
     async def _quit(self, client: Client, args: list[str], text: str) -> None:
@@ -252,15 +273,47 @@ class IRCServer:
 
     @args_required(2)
     async def _reg(self, client: Client, args: list[str], _text: str) -> None:
+        """Регистрация нового пользователя"""
         nick, password = args
+
+        # Если уже аутентифицирован, не позволяем переристрироваться
+        if client._authenticated:
+            await client.send("ERR already authenticated")
+            logger.warning("%s:%d tried to register while authenticated as %s", client.ip, client.port, client.nick)
+            return
+
         result = await self._storage.register(nick, password)
         if result:
             client._nick = nick
-            client._registered = True
-            logger.info("new user registered. nick=%s", nick)
+            client._authenticated = True
+            logger.info("new user registered and authenticated. nick=%s from %s:%d", nick, client.ip, client.port)
             await client.send(f"REGD {nick}")
         else:
             await client.send("ERR nick already taken")
+            logger.warning("%s:%d tried to register with taken nick %s", client.ip, client.port, nick)
+
+    @args_required(2)
+    async def _login(self, client: Client, args: list[str], _text: str) -> None:
+        """Логин существующего пользователя"""
+        nick, password = args
+
+        # Если уже аутентифицирован, не позволяем переавторизоваться
+        if client._authenticated:
+            await client.send("ERR already authenticated")
+            logger.warning("%s:%d tried to login while authenticated as %s", client.ip, client.port, client.nick)
+            return
+
+        # Проверяем, существует ли пользователь и верен ли пароль
+        result = await self._storage.verify(nick, password)
+        if result:
+            client._nick = nick
+            client._authenticated = True
+            logger.info("user logged in. nick=%s from %s:%d", nick, client.ip, client.port)
+            await client.send(f"LOGIN {nick}")
+        else:
+            # Не различаем "пользователь не существует" и "неверный пароль" для безопасности
+            await client.send("ERR invalid nick or password")
+            logger.warning("%s:%d failed login attempt with nick %s", client.ip, client.port, nick)
 
     @args_required(1)
     async def _privmsg(self, client: Client, args: list[str], text: str) -> None:

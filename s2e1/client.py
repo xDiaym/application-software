@@ -17,8 +17,6 @@ class Client:
             return ""
 
         # Parse IRC message format: [:prefix] COMMAND [params] [:trailing]
-        # Example: :!alice JOIN #global
-        # Example: REGD alice
 
         if line.startswith(":"):
             # Has prefix
@@ -64,7 +62,10 @@ class Client:
             params = parts[1] if len(parts) > 1 else ""
 
             if command == "REGD":
-                return f"*** Registered: {params}"
+                return f"*** Registered and authenticated as: {params}"
+
+            elif command == "LOGIN":
+                return f"*** Logged in as: {params}"
 
             elif command == "ERR":
                 return f"*** ERROR: {params}"
@@ -105,20 +106,27 @@ class Client:
 
                 command, *args = line.split(" ")
 
-                if command == "/msg":
+                if command == "/reg":
+                    if len(args) >= 2:
+                        nick, password = args[0], args[1]
+                        await self._send(f"REG {nick} {password}")
+                    else:
+                        print("Usage: /reg <nick> <password>")
+
+                elif command == "/login":
+                    if len(args) >= 2:
+                        nick, password = args[0], args[1]
+                        await self._send(f"LOGIN {nick} {password}")
+                    else:
+                        print("Usage: /login <nick> <password>")
+
+                elif command == "/msg":
                     if len(args) >= 2:
                         self._last_channel = args[0]
                         text = " ".join(args[1:])
                         await self._send(f"PRIVMSG {self._last_channel} :{text}")
                     else:
                         print("Usage: /msg <channel> <text>")
-
-                elif command == "/reg":
-                    if len(args) >= 2:
-                        nick, password = args[0], args[1]
-                        await self._send(f"REG {nick} {password}")
-                    else:
-                        print("Usage: /reg <nick> <password>")
 
                 elif command == "/join":
                     if len(args) >= 1:
@@ -154,6 +162,7 @@ class Client:
         try:
             self._reader, self._writer = await asyncio.open_connection(host, port)
             print(f"Connected to {host}:{port}")
+            print("Please authenticate first: /reg <nick> <password> or /login <nick> <password>")
 
             server_task = asyncio.create_task(self._handle_server())
             stdin_task = asyncio.create_task(self._handle_stdin())
