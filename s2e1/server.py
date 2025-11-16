@@ -135,11 +135,15 @@ class SQLiteStorage:
         return hashlib.sha3_512((password + cls._SALT).encode()).hexdigest()
 
 
-def args_required(num_args: int):
+def args_required(min_args: int = 0, max_args: int = None):
+    """Проверить количество аргументов (min_args обязательно, max_args необязательно)"""
+
     def decorator(fn) -> t.Callable[..., t.Awaitable[None]]:
         @functools.wraps(fn)
         async def wrapper(self, client, args, text):
-            if len(args) != num_args:
+            if len(args) < min_args:
+                return
+            if max_args is not None and len(args) > max_args:
                 return
             return await fn(self, client, args, text)
 
@@ -224,15 +228,32 @@ class IRCServer:
             while True:
                 text = await reader.readline()
                 if not text:
-                    await self._quit(client, [], "")
+                    # Соединение разорвано, отключаем клиента от всех каналов
+                    await self._disconnect_client(client)
                     break
                 await self._process_command(client, text.decode().rstrip())
         finally:
             client.close()
 
+    async def _disconnect_client(self, client: Client) -> None:
+        """Отключить клиента от всех каналов (при разрыве соединения)"""
+        channels_to_quit = list(client._channels)
+
+        for channel in channels_to_quit:
+            self._channels[channel].discard(client)
+            await self.broadcast(
+                channel,
+                f"{client.prefix} QUIT :Connection lost",
+                exclude=client,
+            )
+
+        client._channels.clear()
+        logger.info("%s:%d disconnected", client.ip, client.port)
+
     async def _process_command(self, client: Client, line: str) -> None:
         COMMANDS: dict[str, t.Callable[[Client, list[str], str], t.Awaitable[None]]] = {
             "JOIN": self._join,
+            "PART": self._part,
             "QUIT": self._quit,
             "REG": self._reg,
             "LOGIN": self._login,
@@ -254,7 +275,7 @@ class IRCServer:
         else:
             logger.warning("unknown command '%s'", command)
 
-    @args_required(1)
+    @args_required(min_args=1, max_args=1)
     async def _join(self, client: Client, args: list[str], text: str) -> None:
         """Присоединение к каналу"""
         channel = args[0]
@@ -277,25 +298,74 @@ class IRCServer:
             exclude=client
         )
 
+    @args_required(min_args=1, max_args=1)
+    async def _part(self, client: Client, args: list[str], text: str) -> None:
+        """Выход из канала (PART <channel> [:message])"""
+        channel = args[0]
+
+        # Если не в этом канале, ничего не делаем
+        if channel not in client._channels:
+            await client.send(f"ERR not in channel {channel}")
+            logger.warning("%s:%d tried to part channel %s without being in it",
+                           client.ip, client.port, channel)
+            return
+
+        # Удаляем клиента из канала
+        self._channels[channel].discard(client)
+        client._channels.discard(channel)
+
+        logger.info("%s:%d left channel %s", client.ip, client.port, channel)
+
+        # Отправляем сообщение о выходе только ДРУГИМ клиентам в канале
+        part_message = text if text else "leaving"
+        await self.broadcast(
+            channel,
+            f"{client.prefix} PART {channel} :{part_message}",
+            exclude=client
+        )
+
+    @args_required(min_args=0)
     async def _quit(self, client: Client, args: list[str], text: str) -> None:
-        """Отключение от всех каналов и выход"""
-        # Создаем копию списка каналов, так как будем его изменять
-        channels_to_quit = list(client._channels)
+        """
+        Выход из всех каналов или только текущего (если аргумент не указан или '-c')
+        /QUIT - выход из текущего канала (alias для /PART)
+        /QUIT -a - полное отключение от сервера
+        """
+        # Если есть флаг -a, то полное отключение
+        if args and args[0] == "-a":
+            quit_message = text if text else "Client quit"
+            await self._disconnect_client(client)
+            # Отправляем сигнал клиенту о полном выходе
+            await client.send(f"QUIT :{quit_message}")
+            client.close()
+            logger.info("%s:%d quit completely from server", client.ip, client.port)
+            return
 
-        for channel in channels_to_quit:
-            self._channels[channel].discard(client)
-            # Отправляем сообщение о выходе другим клиентам (exclude=client)
-            await self.broadcast(
-                channel,
-                f"{client.prefix} QUIT :{text or 'Client quit'}",
-                exclude=client,
-            )
+        # По умолчанию - выход из последнего активного канала (если он есть)
+        # Эта логика должна быть в клиенте, но мы можем вывести ошибку
+        if not client._channels:
+            await client.send("ERR not in any channel")
+            logger.warning("%s:%d tried to quit without being in a channel", client.ip, client.port)
+            return
 
-        client._channels.clear()
-        client.close()
-        logger.info("%s:%d quit", client.ip, client.port)
+        # Берем последний канал из списка (Python 3.7+ гарантирует порядок в set через defaultdict)
+        channel = next(iter(client._channels))
 
-    @args_required(2)
+        # Удаляем клиента из канала
+        self._channels[channel].discard(client)
+        client._channels.discard(channel)
+
+        logger.info("%s:%d quit from channel %s", client.ip, client.port, channel)
+
+        # Отправляем сообщение о выходе только ДРУГИМ клиентам в канале
+        quit_message = text if text else "leaving"
+        await self.broadcast(
+            channel,
+            f"{client.prefix} QUIT :{quit_message}",
+            exclude=client
+        )
+
+    @args_required(min_args=2, max_args=2)
     async def _reg(self, client: Client, args: list[str], _text: str) -> None:
         """Регистрация нового пользователя"""
         nick, password = args
@@ -316,7 +386,7 @@ class IRCServer:
             await client.send("ERR nick already taken")
             logger.warning("%s:%d tried to register with taken nick %s", client.ip, client.port, nick)
 
-    @args_required(2)
+    @args_required(min_args=2, max_args=2)
     async def _login(self, client: Client, args: list[str], _text: str) -> None:
         """Логин существующего пользователя"""
         nick, password = args
@@ -339,7 +409,7 @@ class IRCServer:
             await client.send("ERR invalid nick or password")
             logger.warning("%s:%d failed login attempt with nick %s", client.ip, client.port, nick)
 
-    @args_required(1)
+    @args_required(min_args=1, max_args=1)
     async def _privmsg(self, client: Client, args: list[str], text: str) -> None:
         """Отправка сообщения в канал"""
         channel_name = args[0]

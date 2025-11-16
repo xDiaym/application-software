@@ -48,6 +48,13 @@ class Client:
                 channel = params.split()[0] if params else "unknown"
                 return f"*** {nick} has joined {channel}"
 
+            elif command == "PART":
+                # PART #channel :reason
+                msg_parts = params.split(" :", 1)
+                channel = msg_parts[0] if msg_parts else "unknown"
+                reason = msg_parts[1] if len(msg_parts) > 1 else ""
+                return f"*** {nick} has left {channel}" + (f" ({reason})" if reason else "")
+
             elif command == "QUIT":
                 reason = params.split(" :", 1)[1] if " :" in params else "Client quit"
                 return f"*** {nick} has quit ({reason})"
@@ -67,6 +74,10 @@ class Client:
             elif command == "LOGIN":
                 return f"*** Logged in as: {params}"
 
+            elif command == "QUIT":
+                # Полное отключение от сервера
+                return f"*** Disconnected from server: {params}"
+
             elif command == "ERR":
                 return f"*** ERROR: {params}"
 
@@ -79,10 +90,15 @@ class Client:
             while True:
                 binary = await self._reader.readline()
                 if not binary:
+                    print("*** Connection closed by server")
                     break
                 line = binary.decode().rstrip()
                 formatted = self._format_irc_message(line)
                 print(formatted)
+
+                # Если сервер отправил полное отключение, выходим
+                if line.startswith("QUIT"):
+                    break
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -128,6 +144,7 @@ class Client:
                     else:
                         print("Usage: /join <channel>")
 
+
                 elif command == "/msg":
                     if len(args) >= 2:
                         channel = args[0]
@@ -138,9 +155,37 @@ class Client:
                         print("Usage: /msg <channel> <text>")
 
                 elif command == "/quit":
-                    quit_message = " ".join(args) if args else "Client quit"
-                    await self._send(f"QUIT :{quit_message}")
-                    break
+                    # /quit [message] - выход из текущего канала
+                    # /quit -a [message] - полное отключение от сервера
+
+                    if self._last_channel:
+                        # /part [message]
+                        message = " ".join(args) if args else ""
+                        if message:
+                            await self._send(f"PART {self._last_channel} :{message}")
+                        else:
+                            await self._send(f"PART {self._last_channel} :leaving")
+                        self._last_channel = None
+
+                    elif args and args[0] == "-a":
+                        # Полное отключение
+                        quit_message = " ".join(args[1:]) if len(args) > 1 else ""
+                        if quit_message:
+                            await self._send(f"QUIT -a :{quit_message}")
+                        else:
+                            await self._send("QUIT -a :Goodbye")
+                        break
+                    else:
+                        # Выход из канала (как /part)
+                        if self._last_channel:
+                            quit_message = " ".join(args) if args else ""
+                            if quit_message:
+                                await self._send(f"QUIT :{quit_message}")
+                            else:
+                                await self._send("QUIT :leaving")
+                            self._last_channel = None
+                        else:
+                            print("*** You are not in any channel. Use /quit -a to disconnect")
 
                 else:
                     # Если нет явного канала, используем последний
@@ -165,6 +210,7 @@ class Client:
             self._reader, self._writer = await asyncio.open_connection(host, port)
             print(f"Connected to {host}:{port}")
             print("Please authenticate first: /reg <nick> <password> or /login <nick> <password>")
+            print("Commands: /join <channel>, /msg <channel> <text>, /part [msg], /quit [msg], /quit -a [msg]")
 
             server_task = asyncio.create_task(self._handle_server())
             stdin_task = asyncio.create_task(self._handle_stdin())
