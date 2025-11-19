@@ -74,6 +74,26 @@ class Client:
             elif command == "LOGIN":
                 return f"*** Logged in as: {params}"
 
+            elif command == "HISTORY_START":
+                channel_and_count = params.split()
+                channel = channel_and_count[0] if channel_and_count else "unknown"
+                count = channel_and_count[1] if len(channel_and_count) > 1 else "?"
+                return f"*** History for {channel} ({count} messages):"
+
+            elif command == "HISTORY_MSG":
+                # HISTORY_MSG #channel timestamp nick :message
+                msg_parts = params.split(" ", 3)
+                if len(msg_parts) >= 3:
+                    channel = msg_parts[0]
+                    timestamp = msg_parts[1]
+                    nick = msg_parts[2]
+                    message = msg_parts[3][1:] if msg_parts[3].startswith(":") else msg_parts[3]
+                    return f"  [{timestamp}] <{nick}> {message}"
+                return f"< {params}"
+
+            elif command == "HISTORY_END":
+                return f"*** End of history"
+
             elif command == "QUIT":
                 # Полное отключение от сервера
                 return f"*** Disconnected from server: {params}"
@@ -120,69 +140,93 @@ class Client:
                 if not line:
                     continue
 
-                command, *args = line.split(" ")
+                command, *args = line.split(" ", 1)
 
                 if command == "/reg":
-                    if len(args) >= 2:
-                        nick, password = args[0], args[1]
+                    if len(args) > 0 and len(args[0].split()) >= 2:
+                        parts = args[0].split()
+                        nick, password = parts[0], parts[1]
                         await self._send(f"REG {nick} {password}")
                     else:
                         print("Usage: /reg <nick> <password>")
 
                 elif command == "/login":
-                    if len(args) >= 2:
-                        nick, password = args[0], args[1]
+                    if len(args) > 0 and len(args[0].split()) >= 2:
+                        parts = args[0].split()
+                        nick, password = parts[0], parts[1]
                         await self._send(f"LOGIN {nick} {password}")
                     else:
                         print("Usage: /login <nick> <password>")
 
                 elif command == "/join":
-                    if len(args) >= 1:
-                        channel = args[0]
+                    if len(args) > 0:
+                        channel = args[0].split()[0]
                         self._last_channel = channel
                         await self._send(f"JOIN {channel}")
                     else:
                         print("Usage: /join <channel>")
 
-
-                elif command == "/msg":
-                    if len(args) >= 2:
-                        channel = args[0]
-                        text = " ".join(args[1:])
-                        self._last_channel = channel
-                        await self._send(f"PRIVMSG {channel} :{text}")
-                    else:
-                        print("Usage: /msg <channel> <text>")
-
-                elif command == "/quit":
-                    # /quit [message] - выход из текущего канала
-                    # /quit -a [message] - полное отключение от сервера
-
+                elif command == "/part":
                     if self._last_channel:
-                        # /part [message]
-                        message = " ".join(args) if args else ""
+                        message = args[0] if args else ""
                         if message:
                             await self._send(f"PART {self._last_channel} :{message}")
                         else:
                             await self._send(f"PART {self._last_channel} :leaving")
                         self._last_channel = None
-
-                    elif args and args[0] == "-a":
-                        # Полное отключение
-                        quit_message = " ".join(args[1:]) if len(args) > 1 else ""
-                        if quit_message:
-                            await self._send(f"QUIT -a :{quit_message}")
-                        else:
-                            await self._send("QUIT -a :Goodbye")
-                        break
                     else:
-                        # Выход из канала (как /part)
-                        if self._last_channel:
-                            quit_message = " ".join(args) if args else ""
-                            if quit_message:
-                                await self._send(f"QUIT :{quit_message}")
+                        print("*** You are not in any channel")
+
+                elif command == "/history":
+                    if len(args) > 0:
+                        parts = args[0].split()
+                        if len(parts) >= 3:
+                            start_date = parts[0]
+                            end_date = parts[1]
+                            channel = parts[2]
+                            await self._send(f"HISTORY {start_date} {end_date} {channel}")
+                        else:
+                            print("Usage: /history <start_date> <end_date> <channel>")
+                            print("Example: /history 2025-11-16T18:00:00Z 2025-11-16T20:00:00Z #global")
+                    else:
+                        print("Usage: /history <start_date> <end_date> <channel>")
+                        print("Dates must be in RFC 3339 format (e.g., 2025-11-16T19:00:00Z)")
+
+                elif command == "/msg":
+                    if len(args) > 0:
+                        parts = args[0].split(" ", 1)
+                        if len(parts) >= 2:
+                            channel = parts[0]
+                            text = parts[1]
+                            self._last_channel = channel
+                            await self._send(f"PRIVMSG {channel} :{text}")
+                        else:
+                            print("Usage: /msg <channel> <text>")
+                    else:
+                        print("Usage: /msg <channel> <text>")
+
+                elif command == "/quit":
+                    if len(args) > 0:
+                        arg = args[0]
+                        if arg.startswith("-a"):
+                            # Полное отключение
+                            message = arg[2:].strip() if len(arg) > 2 else ""
+                            if message or len(args) > 0 and args[0] != "-a":
+                                await self._send(f"QUIT -a :{message or ' '.join(args[1:])}")
                             else:
-                                await self._send("QUIT :leaving")
+                                await self._send("QUIT -a :Goodbye")
+                            break
+                        else:
+                            # Выход из канала
+                            if self._last_channel:
+                                await self._send(f"QUIT :{arg}")
+                                self._last_channel = None
+                            else:
+                                print("*** You are not in any channel. Use /quit -a to disconnect")
+                    else:
+                        # /quit без аргументов
+                        if self._last_channel:
+                            await self._send("QUIT :leaving")
                             self._last_channel = None
                         else:
                             print("*** You are not in any channel. Use /quit -a to disconnect")
@@ -211,6 +255,7 @@ class Client:
             print(f"Connected to {host}:{port}")
             print("Please authenticate first: /reg <nick> <password> or /login <nick> <password>")
             print("Commands: /join <channel>, /msg <channel> <text>, /part [msg], /quit [msg], /quit -a [msg]")
+            print("         /history <start> <end> <channel>")
 
             server_task = asyncio.create_task(self._handle_server())
             stdin_task = asyncio.create_task(self._handle_stdin())

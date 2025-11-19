@@ -11,7 +11,7 @@ import aiosqlite
 
 GLOBAL_CHAT_ID = 1
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("server")
 
 
@@ -68,30 +68,90 @@ class SQLiteStorage:
         async with self._connection.execute(query, (author_id, GLOBAL_CHAT_ID, text)):
             await self._connection.commit()
 
+    async def get_messages(
+            self, channel: str, begin: datetime.datetime, end: datetime.datetime
+    ) -> list[tuple[str, str, str]]:
+        """
+        Получить сообщения из канала за указанный период времени.
+
+        Args:
+            channel: имя канала (например, #global)
+            begin: начальная дата/время
+            end: конечная дата/время
+
+        Returns:
+            список кортежей (timestamp, nick, text)
+        """
+        logger.debug(f"[HISTORY] get_messages called with channel={channel}, begin={begin}, end={end}")
+
+        async with self._connection.execute(
+                "SELECT id FROM chats WHERE name = ?", (channel,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                logger.warning(f"[HISTORY] Chat '{channel}' not found in database")
+                return []
+
+            chat_id = row[0]
+            logger.debug(f"[HISTORY] Found chat_id={chat_id} for channel {channel}")
+
+        # Формируем датестроки для SQLite (в формате YYYY-MM-DD HH:MM:SS)
+        begin_sql = begin.replace(microsecond=0).isoformat(sep=" ", timespec="seconds")
+        end_sql = end.replace(microsecond=0).isoformat(sep=" ", timespec="seconds")
+
+        logger.debug(f"[HISTORY] Converting dates for SQL query:")
+        logger.debug(f"  begin: {begin} -> {begin_sql}")
+        logger.debug(f"  end:   {end} -> {end_sql}")
+
+        # Сначала проверим, какие вообще сообщения есть в этом канале
+        async with self._connection.execute(
+                f"SELECT COUNT(*) FROM messages WHERE chat_id = ?", (chat_id,)
+        ) as cursor:
+            total_count = await cursor.fetchone()
+            logger.debug(f"[HISTORY] Total messages in channel {channel}: {total_count[0]}")
+
+        # Выведем несколько первых и последних сообщений для контекста
+        async with self._connection.execute(
+                f"SELECT created_at FROM messages WHERE chat_id = ? ORDER BY created_at ASC LIMIT 1",
+                (chat_id,)
+        ) as cursor:
+            first_msg = await cursor.fetchone()
+            if first_msg:
+                logger.debug(f"[HISTORY] First message in channel: {first_msg[0]}")
+
+        async with self._connection.execute(
+                f"SELECT created_at FROM messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
+                (chat_id,)
+        ) as cursor:
+            last_msg = await cursor.fetchone()
+            if last_msg:
+                logger.debug(f"[HISTORY] Last message in channel: {last_msg[0]}")
+
+        # Выполняем основной запрос
+        query = """SELECT m.created_at, u.nick, m.text_ 
+                   FROM messages m 
+                   JOIN users u ON m.author_id = u.id 
+                   WHERE m.chat_id = ? AND m.created_at BETWEEN ? AND ? 
+                   ORDER BY m.created_at ASC"""
+
+        logger.debug(f"[HISTORY] Executing SQL query:")
+        logger.debug(f"  {query}")
+        logger.debug(f"  Parameters: chat_id={chat_id}, begin_sql={begin_sql}, end_sql={end_sql}")
+
+        async with self._connection.execute(query, (chat_id, begin_sql, end_sql)) as cursor:
+            rows = await cursor.fetchall()
+            logger.info(f"[HISTORY] Query returned {len(rows)} messages")
+
+            for i, row in enumerate(rows):
+                logger.debug(f"[HISTORY] Message {i}: timestamp={row[0]}, nick={row[1]}, text={row[2]}")
+
+            return [(row[0], row[1], row[2]) for row in rows]
+
     async def delete_message(self) -> None:
         raise NotImplementedError
 
     async def delete_user(self) -> None:
         raise NotImplementedError
-
-    async def get_messages(
-            self, chat: str, begin: datetime.datetime, end: datetime.datetime
-    ) -> list[str]:
-        async with self._connection.execute(
-                "SELECT id FROM chats WHERE name = ?", (chat,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row is None:
-                logger.warning("chat '%s' not found", chat)
-                return []
-
-            chat_id = row[0]
-
-        async with self._connection.execute(
-                "SELECT author_id, text_ FROM messages WHERE chat_id = ? AND created_at BETWEEN ? and ?",
-                (chat_id, begin.isoformat(), end.isoformat()),
-        ) as cursor:
-            return list(x[1] for x in await cursor.fetchall())
 
     async def register(self, nick: str, password: str) -> bool:
         """Register a new user. Returns True on success, False if nick already exists."""
@@ -142,8 +202,10 @@ def args_required(min_args: int = 0, max_args: int = None):
         @functools.wraps(fn)
         async def wrapper(self, client, args, text):
             if len(args) < min_args:
+                logger.debug(f"[COMMAND] Not enough args for {fn.__name__}: got {len(args)}, need {min_args}")
                 return
             if max_args is not None and len(args) > max_args:
+                logger.debug(f"[COMMAND] Too many args for {fn.__name__}: got {len(args)}, max {max_args}")
                 return
             return await fn(self, client, args, text)
 
@@ -185,6 +247,7 @@ class Client:
         return ":?"
 
     async def send(self, line: str) -> None:
+        logger.debug(f"[SEND] Sending to {self.ip}:{self.port}: {line}")
         self._writer.write((line + "\r\n").encode("utf-8"))
         await self._writer.drain()
 
@@ -193,7 +256,21 @@ class Client:
 
 
 def parse_command(line: str) -> tuple[str, list[str], str]:
-    """Parse IRC command: COMMAND arg1 arg2 :trailing text"""
+    """Parse IRC command: COMMAND arg1 arg2 :trailing text
+
+    Special handling for HISTORY command which has RFC 3339 dates with colons
+    """
+    # Проверяем, это HISTORY команда?
+    if line.startswith("HISTORY "):
+        parts = line.split()
+        if len(parts) >= 4:
+            # HISTORY start_date end_date channel [optional text]
+            command = parts[0]
+            args = parts[1:4]  # первые 3 аргумента (даты и канал)
+            text = " ".join(parts[4:]) if len(parts) > 4 else ""
+            return command, args, text
+
+    # Для остальных команд используем старую логику
     if ":" not in line:
         parts = line.split()
         return parts[0] if parts else "", parts[1:] if len(parts) > 1 else [], ""
@@ -251,6 +328,8 @@ class IRCServer:
         logger.info("%s:%d disconnected", client.ip, client.port)
 
     async def _process_command(self, client: Client, line: str) -> None:
+        logger.debug(f"[COMMAND] Received from {client.ip}:{client.port}: {line}")
+
         COMMANDS: dict[str, t.Callable[[Client, list[str], str], t.Awaitable[None]]] = {
             "JOIN": self._join,
             "PART": self._part,
@@ -258,19 +337,22 @@ class IRCServer:
             "REG": self._reg,
             "LOGIN": self._login,
             "PRIVMSG": self._privmsg,
+            "HISTORY": self._history,
         }
 
         command, args, text = parse_command(line)
+        logger.debug(f"[COMMAND] Parsed: command={command}, args={args}, text={text}")
 
         # Проверка: может ли пользователь выполнить эту команду?
-        # Если не аутентифицирован, разрешены только REG, LOGIN и QUIT
+        # Если не аутентифицирован, разрешены только REG, LOGIN, QUIT и HISTORY
         if not client._authenticated:
-            if command not in ("REG", "LOGIN", "QUIT"):
+            if command not in ("REG", "LOGIN", "QUIT", "HISTORY"):
                 await client.send("ERR not authenticated")
                 logger.warning("%s:%d tried to use %s without authentication", client.ip, client.port, command)
                 return
 
         if fn := COMMANDS.get(command):
+            logger.debug(f"[COMMAND] Executing {command} with args {args}")
             await fn(client, args, text)
         else:
             logger.warning("unknown command '%s'", command)
@@ -436,6 +518,74 @@ class IRCServer:
             f"{client.prefix} PRIVMSG {channel_name} :{text}",
             exclude=client,
         )
+
+    @args_required(min_args=3, max_args=3)
+    async def _history(self, client: Client, args: list[str], text: str) -> None:
+        """
+        Получить историю сообщений из канала
+        HISTORY <start_date> <end_date> <channel>
+        Даты в формате RFC 3339: 2025-11-16T19:00:00Z
+
+        Команда работает только для авторизованных пользователей
+        Пользователь НЕ обязан быть в канале
+        """
+        start_str, end_str, channel = args
+
+        logger.info(f"\n{'=' * 80}")
+        logger.info(f"[HISTORY] COMMAND RECEIVED from {client.ip}:{client.port}")
+        logger.info(f"[HISTORY] start_str = '{start_str}'")
+        logger.info(f"[HISTORY] end_str = '{end_str}'")
+        logger.info(f"[HISTORY] channel = '{channel}'")
+        logger.info(f"[HISTORY] Client nick: {client.nick}")
+        logger.info(f"{'=' * 80}\n")
+
+        # Валидируем даты (простая проверка формата)
+        try:
+            logger.debug(f"[HISTORY] Attempting to parse dates...")
+            # Пытаемся распарсить даты в формате RFC 3339
+            start_str_iso = start_str.replace('Z', '+00:00')
+            end_str_iso = end_str.replace('Z', '+00:00')
+
+            logger.debug(f"[HISTORY] After Z replacement:")
+            logger.debug(f"  start_str_iso = '{start_str_iso}'")
+            logger.debug(f"  end_str_iso = '{end_str_iso}'")
+
+            start = datetime.datetime.fromisoformat(start_str_iso)
+            end = datetime.datetime.fromisoformat(end_str_iso)
+
+            logger.info(f"[HISTORY] Successfully parsed dates:")
+            logger.info(f"  start = {start} (type: {type(start)})")
+            logger.info(f"  end = {end} (type: {type(end)})")
+
+        except ValueError as e:
+            logger.error(f"[HISTORY] Date parsing FAILED: {e}")
+            logger.error(f"[HISTORY] Sending error to client...")
+            await client.send("ERR invalid date format. Use RFC 3339 (e.g., 2025-11-16T19:00:00Z)")
+            return
+
+        # Получаем сообщения из БД (пользователь не обязан быть в канале!)
+        logger.info(f"[HISTORY] Calling storage.get_messages()...")
+        messages = await self._storage.get_messages(channel, start, end)
+        logger.info(f"[HISTORY] Returned {len(messages)} messages from storage")
+
+        if not messages:
+            logger.warning(f"[HISTORY] No messages found, sending empty response")
+            await client.send(f"HISTORY {channel} :no messages")
+            logger.info("%s:%d requested empty history for %s", client.ip, client.port, channel)
+            return
+
+        # Отправляем каждое сообщение клиенту
+        logger.info(f"[HISTORY] Sending HISTORY_START...")
+        await client.send(f"HISTORY_START {channel} {len(messages)}")
+
+        for i, (timestamp, nick, text_msg) in enumerate(messages):
+            logger.debug(f"[HISTORY] Sending message {i + 1}/{len(messages)}: [{timestamp}] {nick}: {text_msg}")
+            await client.send(f"HISTORY_MSG {channel} {timestamp} {nick} :{text_msg}")
+
+        logger.info(f"[HISTORY] Sending HISTORY_END...")
+        await client.send(f"HISTORY_END {channel}")
+
+        logger.info(f"[HISTORY] History request completed successfully\n")
 
     async def run(self, host: str = "0.0.0.0", port: int = 6667) -> None:
         server = await asyncio.start_server(self._handle_connection, host, port)
